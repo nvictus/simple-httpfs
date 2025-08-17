@@ -99,7 +99,7 @@ class FtpFetcher:
             else:
                 break
         if len(data) < amt:
-            data += b'\x00' * (amt - len(data))
+            data += b"\x00" * (amt - len(data))
         else:
             data = data[:amt]
 
@@ -124,10 +124,7 @@ class HttpFetcher:
     def get_size(self, url: str) -> int:
         try:
             head = requests.head(
-                url,
-                allow_redirects=True,
-                verify=self.SSL_VERIFY,
-                timeout=self.timeout
+                url, allow_redirects=True, verify=self.SSL_VERIFY, timeout=self.timeout
             )
         except requests.exceptions.Timeout:
             self.logger.info(f"Timeout occurred while fetching head for {url}")
@@ -207,10 +204,10 @@ class HttpFs(LoggingMixIn, Operations):
     def __init__(
         self,
         schema,
-        disk_cache_size=2 ** 30,
+        disk_cache_size=2**30,
         disk_cache_dir="/tmp/xx",
         lru_capacity=400,
-        block_size=2 ** 20,
+        block_size=2**20,
         aws_profile=None,
         logger=None,
     ):
@@ -265,10 +262,7 @@ class HttpFs(LoggingMixIn, Operations):
                 st_atime=time(),
             )
         else:
-            self.lru_attrs[path] = dict(
-                st_mode=(S_IFDIR | 0o555),
-                st_nlink=2
-            )
+            self.lru_attrs[path] = dict(st_mode=(S_IFDIR | 0o555), st_nlink=2)
 
         return self.lru_attrs[path]
 
@@ -305,7 +299,7 @@ class HttpFs(LoggingMixIn, Operations):
                 break
 
             # Extract only the portion we need from this block
-            output += block[block_start:block_start + data_size]
+            output += block[block_start : block_start + data_size]
             curr_offset += data_size
 
         return output
@@ -339,9 +333,7 @@ class HttpFs(LoggingMixIn, Operations):
 
         self.logger.info(f"Fetching block {cache_key}...")
         start = block_num * self.block_size
-        block = self.fetcher.get_data(
-            url, start, start + self.block_size - 1
-        )
+        block = self.fetcher.get_data(url, start, start + self.block_size - 1)
         self.lru_cache[cache_key] = block
         self.disk_cache[cache_key] = block
         return block
