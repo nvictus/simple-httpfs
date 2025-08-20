@@ -78,12 +78,18 @@ def main():
         )
         sys.exit(1)
 
+    extra_args = {}
+    if sys.platform == "darwin":
+        extra_args["noapplexattr"] = True
+        extra_args["noappledouble"] = True
+
     start_msg = f"""
 Mounting HTTP Filesystem...
     schema: {schema}
     mountpoint: {args["mountpoint"]}
     foreground: {args["foreground"]}
     allow others: {args["allow_other"]}
+    direct_io: True
 """
     print(start_msg, file=sys.stderr)
 
@@ -102,6 +108,8 @@ Mounting HTTP Filesystem...
         args["mountpoint"],
         foreground=args["foreground"],
         allow_other=args["allow_other"],
+        direct_io=True,
+        **extra_args
     )
 
 
