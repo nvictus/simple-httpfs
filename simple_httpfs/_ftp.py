@@ -8,6 +8,12 @@ from obspec import GetRange, Head, ListResult, ListWithDelimiter, ObjectMeta
 
 
 class FTPStore(GetRange, Head, ListWithDelimiter):
+    """
+    An obspec protocol API for FTP.
+
+    See https://developmentseed.org/obspec.
+    """
+
     def __init__(self, url: str, chunk_size: int = 32 * 1024):
         o = urlparse(url)
         self.server = o.netloc
@@ -135,7 +141,7 @@ class FTPStore(GetRange, Head, ListWithDelimiter):
 
 def _resolve_search_dir(path: str, prefix: str | None) -> str:
     """
-    Resolve the correct search directory relative to ``path`` given ``prefix``.
+    Resolve the directory to search given ``prefix``.
     """
     if prefix is not None:
         # If the prefix ends with '/', assume it's a subdirectory of 'path'.
