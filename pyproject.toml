@@ -11,13 +11,6 @@ license = {text = "MIT"}
 authors = [
     {name = "Peter Kerpedjiev", email = "pkerpedjiev@gmail.com"}
 ]
-requires-python = ">=3.10"
-dependencies = [
-    "diskcache",
-    "fusepy",
-    "obstore",
-    "obspec",
-]
 classifiers = [
     "Development Status :: 4 - Beta",
     "Intended Audience :: Developers",
@@ -26,6 +19,19 @@ classifiers = [
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
+]
+requires-python = ">=3.10"
+dependencies = [
+    "diskcache",
+    "fusepy",
+    "obstore",
+    "obspec",
+]
+
+[project.optional-dependencies]
+test = [
+    "pytest>=6.0",
+    "pytest-cov",
 ]
 
 [project.urls]
@@ -52,3 +58,10 @@ select = [
 
 [tool.ruff.lint.isort]
 known-first-party = ["simple_httpfs"]
+
+[tool.pytest.ini_options]
+addopts = [
+    "--strict-markers",
+    "--strict-config",
+    "--verbose",
+]
