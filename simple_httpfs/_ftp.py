@@ -1,3 +1,4 @@
+import posixpath as pp
 from collections.abc import Buffer, Sequence
 from datetime import datetime
 from ftplib import FTP, error_perm
@@ -85,33 +86,88 @@ class FTPStore(GetRange, Head, ListWithDelimiter):
     def list_with_delimiter(
         self, prefix: str | None = None
     ) -> ListResult[Sequence[ObjectMeta]]:
-        fpath = "/".join((self.path, prefix or "")).replace("//", "/")
+        dir_path = _resolve_search_dir(self.path, prefix)
+
         ftp = self._open(self.server)
         try:
-            listing = ftp.mlsd(fpath)
+            dir_listing = ftp.mlsd(dir_path)
         except error_perm:
-            metadata = [self.head(fpath)]
-        else:
-            metadata = []
-            for filename, facts in listing:
-                if filename in [".", ".."]:
-                    continue
+            ftp.close()
+            return {"common_prefixes": [], "objects": []}
+
+        objects = []
+        common_prefixes = set()
+
+        for name, facts in dir_listing:
+            if name in [".", ".."]:
+                continue
+
+            # Include the prefix in the returned path
+            name = _resolve_path(name, prefix)
+            if name is None:
+                continue
+
+            # Directories are listed under "common_prefixes"
+            # Files are listed under "objects"
+            if facts.get("type", "file") == "dir":
+                common_prefixes.add(name + "/")
+            else:
                 size = int(facts.get("size", 0))
                 modify_time = facts.get("modify")
                 if modify_time:
-                    # MLSD returns format: YYYYMMDDHHMMSS or YYYYMMDDHHMMSS.sss
-                    modify_str = modify_time.split(".")[0]  # Remove fractional seconds
-                    last_modified = datetime.strptime(modify_str, "%Y%m%d%H%M%S")
+                    last_modified = _modify_time_to_datetime(modify_time)
                 else:
                     last_modified = datetime.now()
-                metadata.append(
+                objects.append(
                     {
                         "e_tag": None,
                         "last_modified": last_modified,
-                        "path": filename,
+                        "path": name,
                         "size": size,
                         "version": None,
                     }
                 )
+
         ftp.close()
-        return {"common_prefixes": [], "objects": metadata}
+
+        return {"common_prefixes": sorted(list(common_prefixes)), "objects": objects}
+
+
+def _resolve_search_dir(path: str, prefix: str | None) -> str:
+    """
+    Resolve the correct search directory relative to ``path`` given ``prefix``.
+    """
+    if prefix is not None:
+        # If the prefix ends with '/', assume it's a subdirectory of 'path'.
+        # We will search the contents of the subdirectory.
+        # If prefix doesn't end with '/', assume it's an object/file prefix.
+        # We will search the contents of its parent and filter the results.
+        parent_dir = pp.dirname(prefix)
+        if parent_dir:
+            path = pp.join(path, parent_dir)
+
+    return pp.normpath(path)
+
+
+def _resolve_path(name: str, prefix: str | None) -> str | None:
+    """
+    Resolve the path of a retrieved name based on the search prefix.
+
+    Returns None if the name does not start with the prefix.
+    """
+    if prefix is not None:
+        # Append the full file name to the parent directory.
+        # If 'prefix' does not end with '/' it will get trim back to the
+        # parent of the last component.
+        parent_dir = pp.dirname(prefix)
+        if parent_dir:
+            name = pp.join(parent_dir, name)
+        if not name.startswith(prefix):
+            return None
+    return pp.normpath(name).lstrip("/")
+
+
+def _modify_time_to_datetime(modify_time: str | None) -> datetime | None:
+    # MLSD returns format: YYYYMMDDHHMMSS or YYYYMMDDHHMMSS.sss
+    modify_str = modify_time.split(".")[0]  # Remove fractional seconds
+    return datetime.strptime(modify_str, "%Y%m%d%H%M%S")
