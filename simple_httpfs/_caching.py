@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import posixpath as pp
 import threading
 from collections import OrderedDict
 from collections.abc import Buffer, MutableMapping, Sequence
@@ -113,7 +114,7 @@ class CachedStore(Store):
         self._lock: threading.Lock = threading.Lock()
 
     def head(self, path: str) -> ObjectMeta:
-        fpath = "/".join((self.prefix, path)).replace("//", "/")
+        fpath = pp.normpath(pp.join(self.prefix, path)).lstrip("/")
         if fpath in self.meta_cache:
             return self.meta_cache[fpath]
         meta = self.store.head(path)
@@ -128,7 +129,7 @@ class CachedStore(Store):
         end: int | None = None,
         length: int | None = None,
     ) -> Buffer:
-        fpath = "/".join((self.prefix, path)).replace("//", "/")
+        fpath = pp.normpath(pp.join(self.prefix, path)).lstrip("/")
 
         pos = start
         if length is not None:
@@ -190,7 +191,7 @@ class CachedStore(Store):
     ) -> ListResult[Sequence[ObjectMeta]]:
         result = self.store.list_with_delimiter(prefix)
         for item in result["objects"]:
-            path = prefix + item["path"] if prefix else item["path"]
+            path = item["path"]
             if path not in self.meta_cache:
                 self.meta_cache[path] = item
         return result

@@ -196,11 +196,15 @@ class HttpFs(LoggingMixIn, Operations):
             self.disk_cache,
             self.block_size,
         )
-        items = [
+        dirs = [
+            (item + self.sentinel)
+            for item in store.list_with_delimiter()["common_prefixes"]
+        ]
+        files = [
             (item["path"] + self.sentinel)
             for item in store.list_with_delimiter()["objects"]
         ]
-        return [".", "..", *items]
+        return [".", "..", *dirs, *files]
 
     def read(self, path: str, size: int, offset: int, fh: Any = None) -> bytes:
         """
