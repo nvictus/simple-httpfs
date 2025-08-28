@@ -96,14 +96,17 @@ class CachedStore(Store):
     def __init__(
         self,
         store: Store,
-        prefix: str,
+        *,
+        base_url: str,
         meta_cache: LRUCache,
         mem_cache: LRUCache,
         disk_cache: DiskCache,
         block_size: int = 1024 * 1024,
     ):
         self.store = store
-        self.prefix = prefix
+        scheme, path = base_url.split("://", 1)
+        self.scheme = scheme
+        self.base_path = path.lstrip("/")
         self.meta_cache = meta_cache
         self.mem_cache = mem_cache
         self.disk_cache = disk_cache
@@ -113,12 +116,20 @@ class CachedStore(Store):
         )
         self._lock: threading.Lock = threading.Lock()
 
+    def _meta_cache_key(self, path: str) -> str:
+        full_path = pp.normpath(pp.join(self.base_path, path)).lstrip("/")
+        return f"{self.scheme}://{full_path}"
+
+    def _block_cache_key(self, path: str, block_num: int) -> str:
+        full_path = pp.normpath(pp.join(self.base_path, path)).lstrip("/")
+        return f"{self.scheme}://{full_path}.{self.block_size}.{block_num}"
+
     def head(self, path: str) -> ObjectMeta:
-        fpath = pp.normpath(pp.join(self.prefix, path)).lstrip("/")
-        if fpath in self.meta_cache:
-            return self.meta_cache[fpath]
+        cache_key = self._meta_cache_key(path)
+        if cache_key in self.meta_cache:
+            return self.meta_cache[cache_key]
         meta = self.store.head(path)
-        self.meta_cache[fpath] = meta
+        self.meta_cache[cache_key] = meta
         return meta
 
     def get_range(
@@ -129,12 +140,10 @@ class CachedStore(Store):
         end: int | None = None,
         length: int | None = None,
     ) -> Buffer:
-        fpath = pp.normpath(pp.join(self.prefix, path)).lstrip("/")
-
         pos = start
         if length is not None:
             end = start + length
-        else:
+        elif end is None:
             raise ValueError("Either end or length must be provided")
 
         output = b""
@@ -146,7 +155,7 @@ class CachedStore(Store):
 
             # Read the block from cache or from the obstore and write to cache.
             # This is thread-safe.
-            block = self._get_block(fpath, block_num)
+            block = self._get_block(path, block_num)
             if not block:
                 break
 
@@ -166,7 +175,7 @@ class CachedStore(Store):
             return block_lock
 
     def _get_block(self, path: str, block_num: int) -> Buffer:
-        cache_key = f"{path}.{self.block_size}.{block_num}"
+        cache_key = self._block_cache_key(path, block_num)
 
         with self._get_lock(cache_key):
             block = self.mem_cache.get(cache_key, None)
@@ -190,8 +199,4 @@ class CachedStore(Store):
         self, prefix: str | None = None
     ) -> ListResult[Sequence[ObjectMeta]]:
         result = self.store.list_with_delimiter(prefix)
-        for item in result["objects"]:
-            path = item["path"]
-            if path not in self.meta_cache:
-                self.meta_cache[path] = item
         return result
