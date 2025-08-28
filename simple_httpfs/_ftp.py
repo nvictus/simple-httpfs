@@ -142,12 +142,17 @@ class FTPStore(GetRange, Head, ListWithDelimiter):
 def _resolve_search_dir(path: str, prefix: str | None) -> str:
     """
     Resolve the directory to search given ``prefix``.
+
+    If the prefix ends with '/', assume it's a subdirectory of 'path'.
+    We will search and return all of its contents.
+
+    If prefix doesn't end with '/', assume it's an object/file prefix.
+    We will search its parent and filter the results for matches.
     """
     if prefix is not None:
-        # If the prefix ends with '/', assume it's a subdirectory of 'path'.
-        # We will search the contents of the subdirectory.
-        # If prefix doesn't end with '/', assume it's an object/file prefix.
-        # We will search the contents of its parent and filter the results.
+        # Trim back 'prefix' as needed and prepend the base path.
+        # If 'prefix' does not end with '/' it will get trimmed back to the
+        # parent of the last component.
         parent_dir = pp.dirname(prefix)
         if parent_dir:
             path = pp.join(path, parent_dir)
@@ -162,14 +167,17 @@ def _resolve_path(name: str, prefix: str | None) -> str | None:
     Returns None if the name does not start with the prefix.
     """
     if prefix is not None:
-        # Append the full file name to the parent directory.
-        # If 'prefix' does not end with '/' it will get trim back to the
+        # Trim back 'prefix' as needed and append the file name.
+        # If 'prefix' does not end with '/' it will get trimmed back to the
         # parent of the last component.
         parent_dir = pp.dirname(prefix)
         if parent_dir:
             name = pp.join(parent_dir, name)
+
+        # Check for prefix match
         if not name.startswith(prefix):
             return None
+
     return pp.normpath(name).lstrip("/")
 
 
