@@ -1,15 +1,19 @@
 from __future__ import annotations
 
 import logging
-from errno import ENOENT
+import posixpath as pp
+from collections.abc import Buffer
+from errno import EACCES, EIO, ENOENT
 from stat import S_IFDIR, S_IFREG
 from time import time
 from typing import Any
 from urllib.parse import urlparse
 
 import diskcache as dc
+import obspec.exceptions
 import obstore
 from fuse import FuseOSError, LoggingMixIn, Operations
+from obspec.exceptions import map_exception
 
 from ._caching import CachedStore, LRUCache, Store
 from ._ftp import FTPStore
@@ -19,17 +23,25 @@ def path_to_url(path: str, sentinel: str) -> str | None:
     if path == "/" or not path.endswith(sentinel):
         return None
 
-    return (
-        path.lstrip("/")  # Trim leading "/"
-        .replace(":/", "://", 1)  # Restore URL scheme
-        .replace(f"{sentinel}/", "/")  # Remove sentinels from any "parent dirs"
-        .rstrip(sentinel)  # Remove trailing sentinel
+    # Repeated slashes were already removed
+    scheme, path = path.split(":/", 1)
+    scheme = scheme.lstrip("/")
+    path = (
+        path.replace(
+            f"{sentinel}/", "/"
+        ).rstrip(  # Remove sentinels from any "parent dirs"
+            sentinel
+        )  # Remove trailing sentinel
     )
+    path = pp.normpath(path)
+
+    return f"{scheme}://{path}"
 
 
 def load_store(
-    url,
-    store_config: dict | None = None,
+    url: str,
+    *,
+    config: dict | None = None,
     client_options: dict | None = None,
     retry_config: dict | None = None,
     credential_provider: Any | None = None,
@@ -46,7 +58,7 @@ def load_store(
         case _:
             return obstore.store.from_url(
                 url,
-                config=store_config,
+                config=config,
                 client_options=client_options,
                 retry_config=retry_config,
                 credential_provider=credential_provider,
@@ -55,7 +67,7 @@ def load_store(
 
 class HttpFs(LoggingMixIn, Operations):
     """
-    A read-only http(s)/ftp/object storage filesystem.
+    A read-only http(s)/ftp/object storage filesystem for FUSE.
     """
 
     def __init__(
@@ -77,7 +89,7 @@ class HttpFs(LoggingMixIn, Operations):
         Parameters
         ----------
         sentinel : str
-            The terminal sentinel string to identify paths as URLs.
+            The terminal sentinel string to identify paths as URLs. See notes.
         block_size : int
             The block size to use for reads and writes.
         disk_cache_size : int
@@ -86,33 +98,38 @@ class HttpFs(LoggingMixIn, Operations):
             The directory to use for the disk cache.
         lru_capacity : int
             The capacity of the LRU cache.
-        aws_profile : str
-            The AWS profile to use for S3 access.
-        logger : logging.Logger
+        store_config : dict | None
+            Configuration options for the object store if supported.
+        client_options : dict | None
+            Configuration options for the HTTP client if supported.
+        retry_config : dict | None
+            Configuration options for the retry mechanism if supported.
+        credential_provider : Any | None
+            A credential provider for authentication if supported.
+        logger : logging.Logger | None
             The logger to use for logging.
 
         Notes
         -----
         For a given path, the kernel will traverse its ``/``-based hierarchy
-        and call ``getattr`` on each component. If any "directory" is not found,
-        the entire lookup will fail. Therefore, for this filesystem to properly
-        recognize a URI, each component of a path except for the very last one
-        needs to be interpreted as a directory and the full URI needs to be
-        interpreted as a file. To accomplish this, the fully qualified URI is
-        identified by the presence of a trailing *sentinel* string.
+        and call ``getattr`` on each component. If any component of the path is
+        not detected by the filesystem, the entire lookup will fail. Therefore,
+        for this filesystem to properly recognize a URI, each component of its
+        path needs to be interpreted as a directory, but the full URI needs to
+        be interpreted as a file. To accomplish this, the end of a qualified
+        URI is signalled by the presence of a trailing *sentinel* string.
         """
         self.logger = logger
         if not self.logger:
             self.logger = logging.getLogger(__name__)
 
-        self.sentinel = sentinel
-
         self.logger.info(f"Starting with disk_cache_size: {disk_cache_size}")
+
+        self.sentinel = sentinel
         self.meta_cache = LRUCache(capacity=lru_capacity)
         self.mem_cache = LRUCache(capacity=lru_capacity)
         self.disk_cache = dc.Cache(disk_cache_dir, size_limit=disk_cache_size)
         self.block_size = block_size
-
         self.store_config = (
             store_config if store_config is not None else {"skip_signature": True}
         )
@@ -120,42 +137,89 @@ class HttpFs(LoggingMixIn, Operations):
         self.retry_config = retry_config
         self.credential_provider = credential_provider
 
+    def _load_cached_store(self, url: str) -> CachedStore:
+        """
+        Load a store from a URL.
+        """
+        if "://" not in url:
+            raise FuseOSError(ENOENT)
+
+        store = load_store(
+            url,
+            config=self.store_config,
+            client_options=self.client_options,
+            retry_config=self.retry_config,
+            credential_provider=self.credential_provider,
+        )
+
+        return CachedStore(
+            store,
+            base_url=url,
+            meta_cache=self.meta_cache,
+            mem_cache=self.mem_cache,
+            disk_cache=self.disk_cache,
+            block_size=self.block_size,
+        )
+
     def getattr(self, path: str, fh: Any = None) -> dict[str, Any]:
         """
         Return an attribute dictionary for the given path.
 
+        If the sentinel string is missing, the path is interpreted as an
+        empty directory.
+
+        Parameters
+        ----------
+        path : str
+            The URI, unix-normalized as a path. If the sentinel string is
+            missing, the path is interpreted as an empty directory.
+        fh : Any
+            File handle (not used).
+
+        Returns
+        -------
+        dict[str, Any]
+            The attribute dictionary for the given path. It has keys identical
+            to the stat C structure of stat(2).
+
         Notes
         -----
-        The output has keys identical to the stat C structure of stat(2).
         ``st_atime``, ``st_mtime`` and ``st_ctime`` should be unix timestamps
         (floats).
         """
         url = path_to_url(path, self.sentinel)
         if url is None:
             return dict(st_mode=(S_IFDIR | 0o555), st_nlink=2)
-        self.logger.info(f"getattr: HEAD: {url}")
 
-        store = load_store(
-            url,
-            self.store_config,
-            self.client_options,
-            self.retry_config,
-            self.credential_provider,
-        )
-        store = CachedStore(
-            store,
-            path,
-            self.meta_cache,
-            self.mem_cache,
-            self.disk_cache,
-            self.block_size,
-        )
+        store = self._load_cached_store(url)
+
+        self.logger.info(f"getattr: HEAD: {url}")
         try:
             metadata = store.head("")
-        except FileNotFoundError:
-            return dict(st_mode=(S_IFDIR | 0o555), st_nlink=2)
         except Exception as e:
-            raise FuseOSError(ENOENT) from e
+            mapped_exc = map_exception(e)
+            if isinstance(mapped_exc, obspec.exceptions.NotFoundError):
+                return dict(st_mode=(S_IFDIR | 0o555), st_nlink=2)
+
+            self.logger.error(f"getattr: HEAD: {e}")
+            if isinstance(
+                mapped_exc,
+                obspec.exceptions.PermissionDeniedError
+                | obspec.exceptions.UnauthenticatedError,
+            ):
+                raise FuseOSError(EACCES) from e
+            elif isinstance(
+                mapped_exc,
+                obspec.exceptions.InvalidPathError
+                | obspec.exceptions.NotSupportedError,
+            ):
+                raise FuseOSError(ENOENT) from e
+            else:
+                raise FuseOSError(EIO) from e
+
+        # Cached directories marked as None
+        if metadata is None:
+            return dict(st_mode=(S_IFDIR | 0o555), st_nlink=2)
 
         now = time()
         timestamp = (
@@ -175,77 +239,106 @@ class HttpFs(LoggingMixIn, Operations):
     def readdir(self, path: str, fh: Any = None) -> list[str]:
         """
         Return a list of files in the directory.
+
+        Parameters
+        ----------
+        path : str
+            The URI, unix-normalized as a path. If the sentinel string is
+            missing, the path is interpreted as an empty directory.
+        fh : Any
+            File handle (not used).
+
+        Returns
+        -------
+        list[str]
+            A list of contents of the "directory", including sentinel strings.
         """
         url = path_to_url(path, self.sentinel)
         if url is None:
             return [".", ".."]
-        self.logger.info(f"readdir: LIST: {url}")
 
-        store = load_store(
-            url,
-            self.store_config,
-            self.client_options,
-            self.retry_config,
-            self.credential_provider,
-        )
-        store = CachedStore(
-            store,
-            path,
-            self.meta_cache,
-            self.mem_cache,
-            self.disk_cache,
-            self.block_size,
-        )
-        dirs = [
-            (item + self.sentinel)
-            for item in store.list_with_delimiter()["common_prefixes"]
-        ]
-        files = [
-            (item["path"] + self.sentinel)
-            for item in store.list_with_delimiter()["objects"]
-        ]
+        store = self._load_cached_store(url)
+
+        self.logger.info(f"readdir: LIST_WITH_DELIMITER: {url}")
+        try:
+            result = store.list_with_delimiter()
+        except Exception as e:
+            self.logger.error(f"readdir: LIST_WITH_DELIMITER: {e}")
+            mapped_exc = map_exception(e)
+            if isinstance(mapped_exc, obspec.exceptions.NotFoundError):
+                return [".", ".."]  # Return empty directory for not found
+            elif isinstance(
+                mapped_exc,
+                obspec.exceptions.PermissionDeniedError
+                | obspec.exceptions.UnauthenticatedError,
+            ):
+                raise FuseOSError(EACCES) from e
+            else:
+                raise FuseOSError(EIO) from e
+
+        dirs = [(item + self.sentinel) for item in result["common_prefixes"]]
+        # Mark directories as seen by caching None
+        for dir in result["common_prefixes"]:
+            cache_key = store._meta_cache_key(dir)
+            if cache_key not in self.meta_cache:
+                self.meta_cache[cache_key] = None
+
+        files = [(item["path"] + self.sentinel) for item in result["objects"]]
+        # Cache file metadata for all objects seen in listing
+        for item in result["objects"]:
+            cache_key = store._meta_cache_key(item["path"])
+            if cache_key not in self.meta_cache:
+                self.meta_cache[cache_key] = item
+
         return [".", "..", *dirs, *files]
 
-    def read(self, path: str, size: int, offset: int, fh: Any = None) -> bytes:
+    def read(self, path: str, size: int, offset: int, fh: Any = None) -> Buffer | bytes:
         """
         Return a byte string containing the data requested.
 
         Parameters
         ----------
-        path: str
-            The path to the file to read.
-        size: int
+        path : str
+            The URI, unix-normalized as a path. If the sentinel string is
+            missing, the path is interpreted as an empty directory.
+        size : int
             The number of bytes to read.
-        offset: int
+        offset : int
             The offset to start reading from.
-        fh: Any
+        fh : Any
             File handle (not used).
+
+        Returns
+        -------
+        Buffer | bytes
+            The requested data.
         """
         url = path_to_url(path, self.sentinel)
         if url is None:
             return b""
+
+        store = self._load_cached_store(url)
+
         self.logger.debug(
             f"read: GET_RANGE: {url}\n"
             f"range: {offset} - {offset + size - 1}\n"
             f"request_size (KB): {size / 1024:.2f}\n"
         )
-
-        store = load_store(
-            url,
-            self.store_config,
-            self.client_options,
-            self.retry_config,
-            self.credential_provider,
-        )
-        store = CachedStore(
-            store,
-            path,
-            self.meta_cache,
-            self.mem_cache,
-            self.disk_cache,
-            self.block_size,
-        )
-        return store.get_range(url, start=offset, length=size)
+        try:
+            return store.get_range(url, start=offset, length=size)
+        except Exception as e:
+            self.logger.error(f"read: GET_RANGE: {e}")
+            mapped_exc = map_exception(e)
+            if isinstance(mapped_exc, obspec.exceptions.NotFoundError):
+                raise FuseOSError(ENOENT) from e
+            elif isinstance(
+                mapped_exc,
+                obspec.exceptions.PermissionDeniedError
+                | obspec.exceptions.UnauthenticatedError,
+            ):
+                raise FuseOSError(EACCES) from e
+            else:
+                raise FuseOSError(EIO) from e
 
     def link(self, target: str, source: str): ...
 
@@ -257,6 +350,9 @@ class HttpFs(LoggingMixIn, Operations):
         return 0
 
     def statfs(self, path: str) -> dict[str, int]:
+        """
+        Some fake facts about the filesystem.
+        """
         fs_block_size = 128 * 1024
         return dict(
             f_frsize=fs_block_size,  # fundamental block size

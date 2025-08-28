@@ -10,7 +10,7 @@ from .httpfs import HttpFs
 
 def main():
     parser = argparse.ArgumentParser(
-        description="""usage: simple-httpfs <mountpoint>"""
+        description="""usage: simple-httpfs [OPTIONS] <mountpoint>"""
     )
 
     parser.add_argument("mountpoint")
@@ -57,11 +57,7 @@ def main():
         )
         sys.exit(1)
 
-    logging.basicConfig(level=logging.INFO)
     logger = logging.getLogger("simple-httpfs")
-    if args["verbose"]:
-        logger.setLevel(logging.DEBUG)
-
     if args["log"]:
         handler = logging.FileHandler(args["log"])
         formatter = logging.Formatter(
@@ -69,6 +65,11 @@ def main():
         )
         handler.setFormatter(formatter)
         logger.addHandler(handler)
+    else:
+        logging.basicConfig(level=logging.INFO)
+
+    if args["verbose"]:
+        logger.setLevel(logging.DEBUG)
 
     platform_settings = {}
     if sys.platform == "darwin":
@@ -93,7 +94,7 @@ Mounting HTTP Filesystem...
         logger=logger,
     )
 
-    FUSE(
+    _ = FUSE(
         fs,
         args["mountpoint"],
         foreground=args["foreground"],
