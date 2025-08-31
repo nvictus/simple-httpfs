@@ -8,7 +8,7 @@ from fuse import FUSE
 from .httpfs import HttpFs
 
 
-def main():
+def main() -> None:
     parser = argparse.ArgumentParser(
         description="""usage: simple-httpfs [OPTIONS] <mountpoint>"""
     )

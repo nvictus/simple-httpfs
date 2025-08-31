@@ -3,16 +3,28 @@ from __future__ import annotations
 import posixpath as pp
 import threading
 from collections import OrderedDict
-from collections.abc import Buffer, MutableMapping, Sequence
+from collections.abc import Iterator, MutableMapping, Sequence
 from dataclasses import dataclass
-from typing import Protocol
+from typing import TYPE_CHECKING, Any, Generic, Protocol, TypeVar
 from weakref import WeakValueDictionary
 
 from diskcache import Cache as DiskCache
 from obspec import GetRange, Head, ListResult, ListWithDelimiter, ObjectMeta
 
+if TYPE_CHECKING:
+    try:
+        from collections.abc import Buffer
+    except ImportError:
+        from typing_extensions import Buffer
+
+    from obstore import Bytes
+
 
 class Store(GetRange, Head, ListWithDelimiter, Protocol): ...
+
+
+K = TypeVar("K")
+V = TypeVar("V")
 
 
 @dataclass
@@ -43,19 +55,19 @@ class CacheMonitor:
         self.disk_misses = 0
 
 
-class LRUCache(MutableMapping):
+class LRUCache(MutableMapping[K, V], Generic[K, V]):
     def __init__(self, capacity: int = 128):
         self.capacity = capacity
-        self.cache = OrderedDict()
+        self.cache: OrderedDict[K, V] = OrderedDict()
 
-    def __getitem__(self, key):
+    def __getitem__(self, key: K) -> V:
         """Like dict.__getitem__, but updates usage if key exists."""
         if key not in self.cache:
             raise KeyError(key)
         self.cache.move_to_end(key)
         return self.cache[key]
 
-    def __setitem__(self, key, value):
+    def __setitem__(self, key: K, value: V) -> None:
         # If cache hit, move to end before updating
         if key in self.cache:
             self.cache.move_to_end(key)
@@ -64,31 +76,31 @@ class LRUCache(MutableMapping):
         if len(self.cache) > self.capacity:
             self.cache.popitem(last=False)
 
-    def __delitem__(self, key):
+    def __delitem__(self, key: K) -> None:
         del self.cache[key]
 
-    def __iter__(self):
+    def __iter__(self) -> Iterator[K]:
         return iter(self.cache)
 
-    def __len__(self):
+    def __len__(self) -> int:
         return len(self.cache)
 
-    def __repr__(self):
+    def __repr__(self) -> str:
         return (
             f"{self.__class__.__name__}({dict(self.cache)}, capacity={self.capacity})"
         )
 
-    def get(self, key, default=None):
+    def get(self, key: K, default: Any = None) -> Any:
         """Like dict.get, but updates usage if key exists."""
         if key in self.cache:
             self.cache.move_to_end(key)
             return self.cache[key]
         return default
 
-    def pop(self, key, *args):
+    def pop(self, key: K, *args: Any) -> Any:
         return self.cache.pop(key, *args)
 
-    def clear(self):
+    def clear(self) -> None:
         self.cache.clear()
 
 
@@ -98,10 +110,11 @@ class CachedStore(Store):
         store: Store,
         *,
         base_url: str,
-        meta_cache: LRUCache,
-        mem_cache: LRUCache,
+        meta_cache: LRUCache[str, ObjectMeta],
+        mem_cache: LRUCache[str, Buffer],
         disk_cache: DiskCache,
         block_size: int = 1024 * 1024,
+        cache_monitor: CacheMonitor | None = None,
     ):
         self.store = store
         scheme, path = base_url.split("://", 1)
@@ -111,6 +124,7 @@ class CachedStore(Store):
         self.mem_cache = mem_cache
         self.disk_cache = disk_cache
         self.block_size = block_size
+        self.monitor = cache_monitor or CacheMonitor()
         self._block_locks: WeakValueDictionary[str, threading.Lock] = (
             WeakValueDictionary()
         )
@@ -139,7 +153,7 @@ class CachedStore(Store):
         start: int,
         end: int | None = None,
         length: int | None = None,
-    ) -> Buffer:
+    ) -> Bytes | bytes:
         pos = start
         if length is not None:
             end = start + length
@@ -159,10 +173,14 @@ class CachedStore(Store):
             if not block:
                 break
 
+            if not hasattr(block, "__getitem__"):
+                block = bytes(block)
+
             # Extract only the portion we need from this block
-            output += block[data_start : data_start + data_size]
+            output += block[data_start : data_start + data_size : 1]  # type: ignore[index]
             pos += data_size
 
+        self.monitor.total_requests += 1
         return output
 
     def _get_lock(self, cache_key: str) -> threading.Lock:
@@ -177,15 +195,19 @@ class CachedStore(Store):
     def _get_block(self, path: str, block_num: int) -> Buffer:
         cache_key = self._block_cache_key(path, block_num)
 
+        self.monitor.total_blocks += 1
         with self._get_lock(cache_key):
-            block = self.mem_cache.get(cache_key, None)
-            if block is not None:
-                return block
+            if cache_key in self.mem_cache:
+                self.monitor.lru_hits += 1
+                return self.mem_cache[cache_key]
+            self.monitor.lru_misses += 1
 
-            block = self.disk_cache.get(cache_key, None)
-            if block is not None:
+            if cache_key in self.disk_cache:
+                block = self.disk_cache[cache_key]
+                self.monitor.disk_hits += 1
                 self.mem_cache[cache_key] = block
-                return block
+                return block  # type: ignore[no-any-return]
+            self.monitor.disk_misses += 1
 
             block = self.store.get_range(
                 "", start=block_num * self.block_size, length=self.block_size
@@ -198,5 +220,4 @@ class CachedStore(Store):
     def list_with_delimiter(
         self, prefix: str | None = None
     ) -> ListResult[Sequence[ObjectMeta]]:
-        result = self.store.list_with_delimiter(prefix)
-        return result
+        return self.store.list_with_delimiter(prefix)

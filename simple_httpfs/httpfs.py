@@ -2,21 +2,49 @@ from __future__ import annotations
 
 import logging
 import posixpath as pp
-from collections.abc import Buffer
 from errno import EACCES, EIO, ENOENT
 from stat import S_IFDIR, S_IFREG
 from time import time
-from typing import Any
+from typing import TYPE_CHECKING, Any, TypedDict
 from urllib.parse import urlparse
 
-import diskcache as dc
 import obspec.exceptions
 import obstore
+from diskcache import Cache as DiskCache
 from fuse import FuseOSError, LoggingMixIn, Operations
 from obspec.exceptions import map_exception
 
-from ._caching import CachedStore, LRUCache, Store
+from ._caching import CachedStore, CacheMonitor, LRUCache, Store
 from ._ftp import FTPStore
+
+if TYPE_CHECKING:
+    try:
+        from collections.abc import Buffer
+    except ImportError:
+        from typing_extensions import Buffer
+
+    from obstore.store import (
+        AzureConfig,
+        AzureCredentialProvider,
+        ClientConfig,
+        GCSConfig,
+        GCSCredentialProvider,
+        RetryConfig,
+        S3Config,
+        S3CredentialProvider,
+    )
+
+
+class StoreConfigDict(TypedDict, total=False):
+    s3: S3Config
+    gcs: GCSConfig
+    azure: AzureConfig
+
+
+class CredentialProviderDict(TypedDict, total=False):
+    s3: S3CredentialProvider
+    gcs: GCSCredentialProvider
+    azure: AzureCredentialProvider
 
 
 def path_to_url(path: str, sentinel: str) -> str | None:
@@ -41,31 +69,47 @@ def path_to_url(path: str, sentinel: str) -> str | None:
 def load_store(
     url: str,
     *,
-    config: dict | None = None,
-    client_options: dict | None = None,
-    retry_config: dict | None = None,
-    credential_provider: Any | None = None,
+    configs: StoreConfigDict | None = None,
+    credential_providers: CredentialProviderDict | None = None,
+    client_options: ClientConfig | None = None,
+    retry_config: RetryConfig | None = None,
 ) -> Store:
-    match urlparse(url).scheme:
+    try:
+        scheme: str = obstore.parse_scheme(url)
+    except Exception:
+        scheme = urlparse(url).scheme
+
+    config: S3Config | GCSConfig | AzureConfig | None
+    match scheme:
+        case "ftp":
+            return FTPStore(url)
         case "http" | "https":
             client_options = (client_options or {}).copy()
             client_options.setdefault("allow_http", True)
             return obstore.store.HTTPStore(
                 url, client_options=client_options, retry_config=retry_config
             )
-        case "ftp":
-            return FTPStore(url)
-        case _:
+        case "s3" | "gcs" | "azure":
+            if configs and scheme in configs:
+                config = configs[scheme]
+            else:
+                config = {"skip_signature": True}
+            if credential_providers and scheme in credential_providers:
+                credential_provider = credential_providers[scheme]
+            else:
+                credential_provider = None
             return obstore.store.from_url(
                 url,
-                config=config,
+                config=config,  # type: ignore
                 client_options=client_options,
                 retry_config=retry_config,
-                credential_provider=credential_provider,
+                credential_provider=credential_provider,  # type: ignore
             )
+        case _:
+            return obstore.store.from_url(url)
 
 
-class HttpFs(LoggingMixIn, Operations):
+class HttpFs(LoggingMixIn, Operations):  # type: ignore[misc]
     """
     A read-only http(s)/ftp/object storage filesystem for FUSE.
     """
@@ -77,10 +121,10 @@ class HttpFs(LoggingMixIn, Operations):
         disk_cache_size: int = 2**30,
         disk_cache_dir: str = "/tmp/xx",
         lru_capacity: int = 400,
-        store_config: dict | None = None,
-        client_options: dict | None = None,
-        retry_config: dict | None = None,
-        credential_provider: dict | None = None,
+        store_configs: StoreConfigDict | None = None,
+        credential_providers: CredentialProviderDict | None = None,
+        client_options: ClientConfig | None = None,
+        retry_config: RetryConfig | None = None,
         logger: logging.Logger | None = None,
     ):
         """
@@ -98,14 +142,18 @@ class HttpFs(LoggingMixIn, Operations):
             The directory to use for the disk cache.
         lru_capacity : int
             The capacity of the LRU cache.
-        store_config : dict | None
-            Configuration options for the object store if supported.
+        store_config : dict[str, dict] | None
+            Configuration options for different object store schemes. Each key
+            is the scheme name, and the value is a typed dict of configuration
+            options for that scheme. See the obstore documentation for details.
+        credential_provider : dict[str, Callable] | None
+            Credential provideres for different object store schemes. Each key
+            is the scheme name, and the value is a callback that returns
+            credentials. See the obstore documentation for details.
         client_options : dict | None
             Configuration options for the HTTP client if supported.
         retry_config : dict | None
             Configuration options for the retry mechanism if supported.
-        credential_provider : Any | None
-            A credential provider for authentication if supported.
         logger : logging.Logger | None
             The logger to use for logging.
 
@@ -119,23 +167,28 @@ class HttpFs(LoggingMixIn, Operations):
         be interpreted as a file. To accomplish this, the end of a qualified
         URI is signalled by the presence of a trailing *sentinel* string.
         """
-        self.logger = logger
-        if not self.logger:
+        self.logger: logging.Logger
+        if not logger:
             self.logger = logging.getLogger(__name__)
-
+        else:
+            self.logger = logger
         self.logger.info(f"Starting with disk_cache_size: {disk_cache_size}")
 
-        self.sentinel = sentinel
-        self.meta_cache = LRUCache(capacity=lru_capacity)
-        self.mem_cache = LRUCache(capacity=lru_capacity)
-        self.disk_cache = dc.Cache(disk_cache_dir, size_limit=disk_cache_size)
-        self.block_size = block_size
-        self.store_config = (
-            store_config if store_config is not None else {"skip_signature": True}
+        self.sentinel: str = sentinel
+        self.meta_cache: LRUCache[str, Any] = LRUCache(capacity=lru_capacity)
+        self.mem_cache: LRUCache[str, Any] = LRUCache(capacity=lru_capacity)
+        self.disk_cache: DiskCache = DiskCache(
+            disk_cache_dir, size_limit=disk_cache_size
         )
-        self.client_options = client_options
-        self.retry_config = retry_config
-        self.credential_provider = credential_provider
+        self.block_size: int = block_size
+        self.cache_monitor: CacheMonitor = CacheMonitor()
+
+        self.store_configs: StoreConfigDict | None = store_configs or {}
+        self.credential_providers: CredentialProviderDict | None = (
+            credential_providers or {}
+        )
+        self.client_options: ClientConfig | None = client_options
+        self.retry_config: RetryConfig | None = retry_config
 
     def _load_cached_store(self, url: str) -> CachedStore:
         """
@@ -146,10 +199,10 @@ class HttpFs(LoggingMixIn, Operations):
 
         store = load_store(
             url,
-            config=self.store_config,
+            configs=self.store_configs,
+            credential_providers=self.credential_providers,
             client_options=self.client_options,
             retry_config=self.retry_config,
-            credential_provider=self.credential_provider,
         )
 
         return CachedStore(
@@ -159,6 +212,7 @@ class HttpFs(LoggingMixIn, Operations):
             mem_cache=self.mem_cache,
             disk_cache=self.disk_cache,
             block_size=self.block_size,
+            cache_monitor=self.cache_monitor,
         )
 
     def getattr(self, path: str, fh: Any = None) -> dict[str, Any]:
@@ -340,11 +394,11 @@ class HttpFs(LoggingMixIn, Operations):
             else:
                 raise FuseOSError(EIO) from e
 
-    def link(self, target: str, source: str): ...
+    def link(self, target: str, source: str) -> None: ...
 
-    def symlink(self, target: str, source: str): ...
+    def symlink(self, target: str, source: str) -> None: ...
 
-    def unlink(self, path: str): ...
+    def unlink(self, path: str) -> None: ...
 
     def write(self, path: str, buf: bytes, size: int, offset: int, fip: Any) -> int:
         return 0
@@ -363,7 +417,7 @@ class HttpFs(LoggingMixIn, Operations):
             f_namemax=8192,  # maximum filename length (in chars)
         )
 
-    def destroy(self, path: str) -> int:
+    def destroy(self, path: str) -> None:
         """
         Called on filesystem destruction. Path is always `/`.
         """

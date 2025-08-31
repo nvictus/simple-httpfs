@@ -1,5 +1,5 @@
 import posixpath as pp
-from collections.abc import Buffer, Sequence
+from collections.abc import Sequence
 from datetime import datetime
 from ftplib import FTP, error_perm
 from urllib.parse import urlparse
@@ -16,12 +16,12 @@ class FTPStore(GetRange, Head, ListWithDelimiter):
 
     def __init__(self, url: str, chunk_size: int = 32 * 1024):
         o = urlparse(url)
-        self.server = o.netloc
+        self.host = o.netloc
         self.path = o.path
         self.chunk_size = chunk_size
 
-    def _open(self, server) -> FTP:
-        ftp = FTP(server)
+    def _open(self, host: str) -> FTP:
+        ftp = FTP(host)
         ftp.login()
 
         # Set the transfer mode to binary.
@@ -31,10 +31,10 @@ class FTPStore(GetRange, Head, ListWithDelimiter):
 
     def head(self, path: str) -> ObjectMeta:
         fpath = "/".join((self.path, path)).replace("//", "/")
-        ftp = self._open(self.server)
+        ftp = self._open(self.host)
 
         try:
-            size = ftp.size(fpath)
+            size = ftp.size(fpath) or 0
         except error_perm as e:
             raise FileNotFoundError from e
 
@@ -60,15 +60,18 @@ class FTPStore(GetRange, Head, ListWithDelimiter):
 
     def get_range(
         self, path: str, start: int, end: int | None = None, length: int | None = None
-    ) -> Buffer:
+    ) -> bytes:
+        if length is not None:
+            end = start + length
+        elif end is None:
+            raise ValueError("Must specify either 'end' or 'length'")
+
         fpath = "/".join((self.path, path)).replace("//", "/")
-        ftp = self._open(self.server)
-        if start > ftp.size(fpath):
+        ftp = self._open(self.host)
+        if start > (ftp.size(fpath) or 0):
             data = b""
         else:
             conn = ftp.transfercmd(f"RETR {fpath}", rest=start)
-            if length is not None:
-                end = start + length
             amt = end - start
 
             # Fetch the data in chunks.
@@ -94,33 +97,33 @@ class FTPStore(GetRange, Head, ListWithDelimiter):
     ) -> ListResult[Sequence[ObjectMeta]]:
         dir_path = _resolve_search_dir(self.path, prefix)
 
-        ftp = self._open(self.server)
+        ftp = self._open(self.host)
         try:
             dir_listing = ftp.mlsd(dir_path)
         except error_perm:
             ftp.close()
             return {"common_prefixes": [], "objects": []}
 
-        objects = []
-        common_prefixes = set()
+        objects: list[ObjectMeta] = []
+        common_prefixes: set[str] = set()
 
         for name, facts in dir_listing:
             if name in [".", ".."]:
                 continue
 
             # Include the prefix in the returned path
-            name = _resolve_path(name, prefix)
-            if name is None:
+            resolved_name = _resolve_path(name, prefix)
+            if resolved_name is None:
                 continue
 
             # Directories are listed under "common_prefixes"
             # Files are listed under "objects"
             if facts.get("type", "file") == "dir":
-                common_prefixes.add(name + "/")
+                common_prefixes.add(resolved_name + "/")
             else:
                 size = int(facts.get("size", 0))
                 modify_time = facts.get("modify")
-                if modify_time:
+                if modify_time is not None:
                     last_modified = _modify_time_to_datetime(modify_time)
                 else:
                     last_modified = datetime.now()
@@ -128,7 +131,7 @@ class FTPStore(GetRange, Head, ListWithDelimiter):
                     {
                         "e_tag": None,
                         "last_modified": last_modified,
-                        "path": name,
+                        "path": resolved_name,
                         "size": size,
                         "version": None,
                     }
@@ -181,7 +184,7 @@ def _resolve_path(name: str, prefix: str | None) -> str | None:
     return pp.normpath(name).lstrip("/")
 
 
-def _modify_time_to_datetime(modify_time: str | None) -> datetime | None:
+def _modify_time_to_datetime(modify_time: str) -> datetime:
     # MLSD returns format: YYYYMMDDHHMMSS or YYYYMMDDHHMMSS.sss
     modify_str = modify_time.split(".")[0]  # Remove fractional seconds
     return datetime.strptime(modify_str, "%Y%m%d%H%M%S")
