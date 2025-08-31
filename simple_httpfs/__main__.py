@@ -2,6 +2,7 @@ import argparse
 import logging
 import os.path as op
 import sys
+from typing import Any
 
 from fuse import FUSE
 
@@ -73,7 +74,7 @@ def main() -> None:
     if args["verbose"]:
         logger.setLevel(logging.DEBUG)
 
-    platform_settings = {}
+    platform_settings: dict[str, Any] = {}
     if sys.platform == "darwin":
         platform_settings["noapplexattr"] = True
         platform_settings["noappledouble"] = True
