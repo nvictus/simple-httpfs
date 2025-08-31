@@ -116,7 +116,7 @@ class TestFTPStore:
 
     def test_init(self):
         store = FTPStore("ftp://ftp.example.com/path/to/files/")
-        assert store.server == "ftp.example.com"
+        assert store.host == "ftp.example.com"
         assert store.path == "/path/to/files/"
         assert store.chunk_size == 32 * 1024
 

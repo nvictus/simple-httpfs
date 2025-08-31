@@ -65,7 +65,7 @@ class TestHelperFunctions:
         assert store == mock_store
         mock_from_url.assert_called_once_with(
             "s3://bucket/file.txt",
-            config=None,
+            config={"skip_signature": True},
             client_options=None,
             retry_config=None,
             credential_provider=None,
@@ -242,18 +242,18 @@ class TestHttpFs:
             disk_cache_size=2 * 1024 * 1024,
             disk_cache_dir=cache_dir,
             lru_capacity=50,
-            store_config={"custom": True},
-            client_options={"timeout": 60},
-            retry_config={"retries": 3},
+            store_configs={"s3": {"region": "us-west-2"}},
+            client_options={"timeout": "60s"},
+            retry_config={"max_retries": 3},
         )
 
         assert fs.sentinel == "EOL"
         assert fs.block_size == 128
         assert fs.meta_cache.capacity == 50
         assert fs.mem_cache.capacity == 50
-        assert fs.store_config == {"custom": True}
-        assert fs.client_options == {"timeout": 60}
-        assert fs.retry_config == {"retries": 3}
+        assert fs.store_configs == {"s3": {"region": "us-west-2"}}
+        assert fs.client_options == {"timeout": "60s"}
+        assert fs.retry_config == {"max_retries": 3}
 
     def test_load_cached_store_creates_correct_store(self, httpfs):
         with patch("simple_httpfs.httpfs.load_store") as mock_load_store:
@@ -269,10 +269,10 @@ class TestHttpFs:
 
             mock_load_store.assert_called_once_with(
                 "http://example.com/file.txt",
-                config={"skip_signature": True},
+                configs={},
+                credential_providers={},
                 client_options=None,
                 retry_config=None,
-                credential_provider=None,
             )
 
     def test_load_cached_store_invalid_url(self, httpfs):

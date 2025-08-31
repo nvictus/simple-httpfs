@@ -4,7 +4,7 @@ import obstore
 import pytest
 from diskcache import Cache as DiskCache
 
-from simple_httpfs._caching import CachedStore, LRUCache
+from simple_httpfs._caching import CachedStore, CacheMonitor, LRUCache
 
 
 class TestLRUCache:
@@ -305,6 +305,7 @@ class TestCachedStore:
             mem_cache=mem_cache,
             disk_cache=disk_cache,
             block_size=32,
+            cache_monitor=CacheMonitor(),
         )
 
     def test_init(self, memory_store, caches):
@@ -316,6 +317,7 @@ class TestCachedStore:
             mem_cache=mem_cache,
             disk_cache=disk_cache,
             block_size=1024,
+            cache_monitor=CacheMonitor(),
         )
 
         assert cached_store.store is memory_store
@@ -442,6 +444,7 @@ class TestCachedStore:
             mem_cache=mem_cache,
             disk_cache=disk_cache,
             block_size=32,
+            cache_monitor=CacheMonitor(),
         )
         _ = cached_store.head("file1.txt")
 
@@ -458,6 +461,7 @@ class TestCachedStore:
             mem_cache=mem_cache,
             disk_cache=disk_cache,
             block_size=16,  # Smaller block size
+            cache_monitor=CacheMonitor(),
         )
         _ = cached_store.get_range("file1.txt", start=0, length=20)
 
@@ -478,6 +482,7 @@ class TestCachedStore:
             mem_cache=mem_cache,
             disk_cache=disk_cache,
             block_size=32,
+            cache_monitor=CacheMonitor(),
         )
 
         s3_store = CachedStore(
@@ -487,6 +492,7 @@ class TestCachedStore:
             mem_cache=mem_cache,
             disk_cache=disk_cache,
             block_size=32,
+            cache_monitor=CacheMonitor(),
         )
 
         # Access the same file through both stores
