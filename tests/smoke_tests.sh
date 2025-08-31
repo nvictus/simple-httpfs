@@ -16,9 +16,9 @@ EOL="..."
 echo "Starting filesystem..."
 mkdir -p "$MOUNT_POINT"
 simple-httpfs -f -v "$MOUNT_POINT" --log /dev/null &
+sleep 2
 
 echo "Testing HTTP..."
-sleep 2
 http_url="$MOUNT_POINT/https:/raw.githubusercontent.com/octocat/Hello-World/master/README"
 ls -la $MOUNT_POINT/$TARGET1$EOL
 ls -la $MOUNT_POINT/$TARGET2$EOL
