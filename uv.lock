@@ -360,8 +360,6 @@ dependencies = [
 [package.optional-dependencies]
 dev = [
     { name = "mypy" },
-]
-test = [
     { name = "pytest" },
     { name = "pytest-cov" },
 ]
@@ -373,11 +371,11 @@ requires-dist = [
     { name = "mypy", marker = "extra == 'dev'", specifier = ">=1.0" },
     { name = "obspec" },
     { name = "obstore" },
-    { name = "pytest", marker = "extra == 'test'", specifier = ">=6.0" },
-    { name = "pytest-cov", marker = "extra == 'test'" },
+    { name = "pytest", marker = "extra == 'dev'", specifier = ">=6.0" },
+    { name = "pytest-cov", marker = "extra == 'dev'" },
     { name = "typing-extensions", marker = "python_full_version < '3.12'" },
 ]
-provides-extras = ["test", "dev"]
+provides-extras = ["dev"]
 
 [[package]]
 name = "tomli"

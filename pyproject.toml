@@ -30,12 +30,10 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-test = [
-    "pytest>=6.0",
-    "pytest-cov",
-]
 dev = [
     "mypy>=1.0",
+    "pytest>=6.0",
+    "pytest-cov",
 ]
 
 [project.urls]
