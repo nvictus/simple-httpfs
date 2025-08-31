@@ -23,13 +23,15 @@ def main() -> None:
         help="Run in the foreground",
     )
 
+    parser.add_argument("--sentinel", default="...")
+
     parser.add_argument("--block-size", default=2**20, type=int)
+
+    parser.add_argument("--lru-capacity", default=400, type=int)
 
     parser.add_argument("--disk-cache-size", default=2**30, type=int)
 
     parser.add_argument("--disk-cache-dir", default="/tmp/xx")
-
-    parser.add_argument("--lru-capacity", default=400, type=int)
 
     parser.add_argument(
         "--allow-other",
@@ -86,7 +88,7 @@ Mounting HTTP Filesystem...
     print(start_msg, file=sys.stderr)
 
     fs = HttpFs(
-        sentinel="...",
+        sentinel=args["sentinel"],
         disk_cache_size=args["disk_cache_size"],
         disk_cache_dir=args["disk_cache_dir"],
         lru_capacity=args["lru_capacity"],
