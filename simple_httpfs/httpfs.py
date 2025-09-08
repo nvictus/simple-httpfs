@@ -147,7 +147,7 @@ class HttpFs(LoggingMixIn, Operations):  # type: ignore[misc]
             is the scheme name, and the value is a typed dict of configuration
             options for that scheme. See the obstore documentation for details.
         credential_provider : dict[str, Callable] | None
-            Credential provideres for different object store schemes. Each key
+            Credential providers for different object store schemes. Each key
             is the scheme name, and the value is a callback that returns
             credentials. See the obstore documentation for details.
         client_options : dict | None
