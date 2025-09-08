@@ -142,7 +142,7 @@ class HttpFs(LoggingMixIn, Operations):  # type: ignore[misc]
             The directory to use for the disk cache.
         lru_capacity : int
             The capacity of the LRU cache.
-        store_config : dict[str, dict] | None
+        store_configs : dict[str, dict] | None
             Configuration options for different object store schemes. Each key
             is the scheme name, and the value is a typed dict of configuration
             options for that scheme. See the obstore documentation for details.
